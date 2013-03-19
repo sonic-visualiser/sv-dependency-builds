@@ -1,0 +1,1 @@
+CXX="i486-mingw32-g++ -I/work/sonic-visualiser/sv-dependency-builds/include -L/work/sonic-visualiser/sv-dependency-builds/lib/win32" CC="i486-mingw32-gcc -I/work/sonic-visualiser/sv-dependency-builds/include -L/work/sonic-visualiser/sv-dependency-builds/lib/win32" ./configure --host=i486-unknown-windows --prefix=/work/sonic-visualiser/sv-dependency-builds/

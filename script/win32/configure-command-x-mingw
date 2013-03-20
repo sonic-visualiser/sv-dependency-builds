@@ -2,4 +2,4 @@
 mypath=`pwd`/`dirname $0`
 deproot="$mypath"/../../
 prefix="$deproot"/win32-mingw
-CXX="i486-mingw32-g++ -I$prefix/include -L$prefix/lib/win32" CC="i486-mingw32-gcc -I$prefix/include -L$prefix/lib/win32" ./configure --host=i486-unknown-windows --prefix=$prefix/
+CXX="i486-mingw32-g++ -I$prefix/include -L$prefix/lib" CC="i486-mingw32-gcc -I$prefix/include -L$prefix/lib" ./configure --prefix=$prefix/ --host=i486-unknown-windows

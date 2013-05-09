@@ -6,7 +6,7 @@
     An API for audio analysis and feature extraction plugins.
 
     Centre for Digital Music, Queen Mary, University of London.
-    Copyright 2006 Chris Cannam.
+    This file copyright 2006 Dan Stowell.
   
     Permission is hereby granted, free of charge, to any person
     obtaining a copy of this software and associated documentation
@@ -34,40 +34,51 @@
     authorization.
 */
 
-#ifndef _VAMP_HOSTSDK_HOSTGUARD_H_
-#define _VAMP_HOSTSDK_HOSTGUARD_H_
+#ifndef _AMPLITUDE_FOLLOWER_PLUGIN_H_
+#define _AMPLITUDE_FOLLOWER_PLUGIN_H_
 
-#ifdef _VAMP_IN_PLUGINSDK
-#error You have included headers from both vamp-sdk and vamp-hostsdk in the same source file. Please include only vamp-sdk headers in plugin code, and only vamp-hostsdk headers in host code.
-#else
+#include "vamp-sdk/Plugin.h"
 
-#define _VAMP_IN_HOSTSDK
+/**
+ * Example plugin implementing the SuperCollider amplitude follower
+ * function.
+ */
 
-#define VAMP_SDK_VERSION "2.5"
-#define VAMP_SDK_MAJOR_VERSION 2
-#define VAMP_SDK_MINOR_VERSION 5
+class AmplitudeFollower : public Vamp::Plugin
+{
+public:
+    AmplitudeFollower(float inputSampleRate);
+    virtual ~AmplitudeFollower();
 
-#ifdef _VAMP_NO_HOST_NAMESPACE
-#define _VAMP_SDK_HOSTSPACE_BEGIN(h)
-#define _VAMP_SDK_HOSTSPACE_END(h)
-#define _VAMP_SDK_PLUGSPACE_BEGIN(h)
-#define _VAMP_SDK_PLUGSPACE_END(h)
-#else
-#define _VAMP_SDK_HOSTSPACE_BEGIN(h) \
-	namespace _VampHost {
+    bool initialise(size_t channels, size_t stepSize, size_t blockSize);
+    void reset();
 
-#define _VAMP_SDK_HOSTSPACE_END(h) \
-	} \
-	using namespace _VampHost;
-#define _VAMP_SDK_PLUGSPACE_BEGIN(h) \
-	namespace _VampHost {
+    InputDomain getInputDomain() const { return TimeDomain; }
 
-#define _VAMP_SDK_PLUGSPACE_END(h) \
-	} \
-	using namespace _VampHost;
+    std::string getIdentifier() const;
+    std::string getName() const;
+    std::string getDescription() const;
+    std::string getMaker() const;
+    int getPluginVersion() const;
+    std::string getCopyright() const;
+	
+    OutputList getOutputDescriptors() const;
+	
+    ParameterList getParameterDescriptors() const;
+    float getParameter(std::string paramid) const;
+    void setParameter(std::string paramid, float newval);
+
+    FeatureSet process(const float *const *inputBuffers,
+                       Vamp::RealTime timestamp);
+
+    FeatureSet getRemainingFeatures();
+
+protected:
+    size_t m_stepSize;
+    float  m_previn;
+    float  m_clampcoef;
+    float  m_relaxcoef;
+};
+
+
 #endif
-
-#endif
-
-#endif
-

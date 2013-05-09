@@ -34,40 +34,47 @@
     authorization.
 */
 
-#ifndef _VAMP_HOSTSDK_HOSTGUARD_H_
-#define _VAMP_HOSTSDK_HOSTGUARD_H_
+#ifndef _POWER_SPECTRUM_PLUGIN_H_
+#define _POWER_SPECTRUM_PLUGIN_H_
 
-#ifdef _VAMP_IN_PLUGINSDK
-#error You have included headers from both vamp-sdk and vamp-hostsdk in the same source file. Please include only vamp-sdk headers in plugin code, and only vamp-hostsdk headers in host code.
-#else
+#include "vamp-sdk/Plugin.h"
 
-#define _VAMP_IN_HOSTSDK
+/**
+ * Example plugin that returns a power spectrum calculated (trivially)
+ * from the frequency domain representation of each block of audio.
+ * This is one of the simplest possible Vamp plugins, included as an
+ * example of how to return the appropriate value structure for this
+ * sort of visualisation.
+ */
 
-#define VAMP_SDK_VERSION "2.5"
-#define VAMP_SDK_MAJOR_VERSION 2
-#define VAMP_SDK_MINOR_VERSION 5
+class PowerSpectrum : public Vamp::Plugin
+{
+public:
+    PowerSpectrum(float inputSampleRate);
+    virtual ~PowerSpectrum();
 
-#ifdef _VAMP_NO_HOST_NAMESPACE
-#define _VAMP_SDK_HOSTSPACE_BEGIN(h)
-#define _VAMP_SDK_HOSTSPACE_END(h)
-#define _VAMP_SDK_PLUGSPACE_BEGIN(h)
-#define _VAMP_SDK_PLUGSPACE_END(h)
-#else
-#define _VAMP_SDK_HOSTSPACE_BEGIN(h) \
-	namespace _VampHost {
+    bool initialise(size_t channels, size_t stepSize, size_t blockSize);
+    void reset();
 
-#define _VAMP_SDK_HOSTSPACE_END(h) \
-	} \
-	using namespace _VampHost;
-#define _VAMP_SDK_PLUGSPACE_BEGIN(h) \
-	namespace _VampHost {
+    InputDomain getInputDomain() const { return FrequencyDomain; }
 
-#define _VAMP_SDK_PLUGSPACE_END(h) \
-	} \
-	using namespace _VampHost;
+    std::string getIdentifier() const;
+    std::string getName() const;
+    std::string getDescription() const;
+    std::string getMaker() const;
+    int getPluginVersion() const;
+    std::string getCopyright() const;
+
+    OutputList getOutputDescriptors() const;
+
+    FeatureSet process(const float *const *inputBuffers,
+                       Vamp::RealTime timestamp);
+
+    FeatureSet getRemainingFeatures();
+
+protected:
+    size_t m_blockSize;
+};
+
+
 #endif
-
-#endif
-
-#endif
-

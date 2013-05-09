@@ -34,40 +34,42 @@
     authorization.
 */
 
-#ifndef _VAMP_HOSTSDK_HOSTGUARD_H_
-#define _VAMP_HOSTSDK_HOSTGUARD_H_
+#ifndef _SYSTEM_H_
+#define _SYSTEM_H_
 
-#ifdef _VAMP_IN_PLUGINSDK
-#error You have included headers from both vamp-sdk and vamp-hostsdk in the same source file. Please include only vamp-sdk headers in plugin code, and only vamp-hostsdk headers in host code.
+#ifdef _WIN32
+
+#include <windows.h>
+
+#define DLOPEN(a,b)  LoadLibrary((a).c_str())
+#define DLSYM(a,b)   GetProcAddress((HINSTANCE)(a),(b))
+#define DLCLOSE(a)   FreeLibrary((HINSTANCE)(a))
+#define DLERROR()    ""
+
+#define PLUGIN_SUFFIX "dll"
+
 #else
 
-#define _VAMP_IN_HOSTSDK
+#include <dlfcn.h>
 
-#define VAMP_SDK_VERSION "2.5"
-#define VAMP_SDK_MAJOR_VERSION 2
-#define VAMP_SDK_MINOR_VERSION 5
+#define DLOPEN(a,b)  dlopen((a).c_str(),(b))
+#define DLSYM(a,b)   dlsym((a),(b))
+#define DLCLOSE(a)   dlclose((a))
+#define DLERROR()    dlerror()
 
-#ifdef _VAMP_NO_HOST_NAMESPACE
-#define _VAMP_SDK_HOSTSPACE_BEGIN(h)
-#define _VAMP_SDK_HOSTSPACE_END(h)
-#define _VAMP_SDK_PLUGSPACE_BEGIN(h)
-#define _VAMP_SDK_PLUGSPACE_END(h)
-#else
-#define _VAMP_SDK_HOSTSPACE_BEGIN(h) \
-	namespace _VampHost {
+#ifdef __APPLE__
 
-#define _VAMP_SDK_HOSTSPACE_END(h) \
-	} \
-	using namespace _VampHost;
-#define _VAMP_SDK_PLUGSPACE_BEGIN(h) \
-	namespace _VampHost {
+#define PLUGIN_SUFFIX  "dylib"
+#define HAVE_OPENDIR 1
 
-#define _VAMP_SDK_PLUGSPACE_END(h) \
-	} \
-	using namespace _VampHost;
-#endif
+#else 
 
-#endif
+#define PLUGIN_SUFFIX  "so"
+#define HAVE_OPENDIR 1
+
+#endif /* __APPLE__ */
+
+#endif /* ! _WIN32 */
 
 #endif
 

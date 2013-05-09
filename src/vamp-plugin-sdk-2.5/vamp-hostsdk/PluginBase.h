@@ -34,40 +34,14 @@
     authorization.
 */
 
-#ifndef _VAMP_HOSTSDK_HOSTGUARD_H_
-#define _VAMP_HOSTSDK_HOSTGUARD_H_
+#ifndef _VAMP_HOSTSDK_PLUGIN_BASE_H_
+#define _VAMP_HOSTSDK_PLUGIN_BASE_H_
 
-#ifdef _VAMP_IN_PLUGINSDK
-#error You have included headers from both vamp-sdk and vamp-hostsdk in the same source file. Please include only vamp-sdk headers in plugin code, and only vamp-hostsdk headers in host code.
-#else
+// Do not include vamp-sdk/PluginBase.h directly from host code.
+// Always use this header instead.
 
-#define _VAMP_IN_HOSTSDK
+#include "hostguard.h"
 
-#define VAMP_SDK_VERSION "2.5"
-#define VAMP_SDK_MAJOR_VERSION 2
-#define VAMP_SDK_MINOR_VERSION 5
-
-#ifdef _VAMP_NO_HOST_NAMESPACE
-#define _VAMP_SDK_HOSTSPACE_BEGIN(h)
-#define _VAMP_SDK_HOSTSPACE_END(h)
-#define _VAMP_SDK_PLUGSPACE_BEGIN(h)
-#define _VAMP_SDK_PLUGSPACE_END(h)
-#else
-#define _VAMP_SDK_HOSTSPACE_BEGIN(h) \
-	namespace _VampHost {
-
-#define _VAMP_SDK_HOSTSPACE_END(h) \
-	} \
-	using namespace _VampHost;
-#define _VAMP_SDK_PLUGSPACE_BEGIN(h) \
-	namespace _VampHost {
-
-#define _VAMP_SDK_PLUGSPACE_END(h) \
-	} \
-	using namespace _VampHost;
-#endif
+#include <vamp-sdk/PluginBase.h>
 
 #endif
-
-#endif
-

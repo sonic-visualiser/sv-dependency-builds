@@ -61,10 +61,11 @@ default:	all
 
 # Tools selection
 #
-CXX		= i586-mingw32msvc-g++
-LD		= i586-mingw32msvc-g++
-AR		= i586-mingw32msvc-ar
-RANLIB		= i586-mingw32msvc-ranlib
+CC              = gcc
+CXX		= g++
+LD		= g++
+AR		= ar
+RANLIB		= ranlib
 
 # Compile flags
 #

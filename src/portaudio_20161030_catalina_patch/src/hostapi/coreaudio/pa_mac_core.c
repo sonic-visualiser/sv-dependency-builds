@@ -1262,6 +1262,10 @@ static PaError OpenAndSetupOneAudioUnit(
     desc.componentFlags        = 0;
     desc.componentFlagsMask    = 0;
 
+#ifdef AUDIO_COMPONENT_FIX
+    DBUG( ( "Using AUDIO_COMPONENT_FIX logic." ) );
+#endif
+
     /* -- find the component -- */
 #ifndef AUDIO_COMPONENT_FIX
     comp = FindNextComponent( NULL, &desc );

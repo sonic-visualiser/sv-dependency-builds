@@ -15821,8 +15821,10 @@ case "${host_os}" in
 
         $as_echo "#define PA_USE_COREAUDIO 1" >>confdefs.h
 
+        $as_echo "#define AUDIO_COMPONENT_FIX 1" >>confdefs.h
 
-        CFLAGS="$CFLAGS -I\$(top_srcdir)/src/os/unix -Wno-deprecated -Werror"
+
+        CFLAGS="$CFLAGS -I\$(top_srcdir)/src/os/unix -Wno-deprecated"
         LIBS="-framework CoreAudio -framework AudioToolbox -framework AudioUnit -framework Carbon"
 
         if test "x$enable_mac_universal" = "xyes" ; then
@@ -15863,13 +15865,19 @@ case "${host_os}" in
               elif xcodebuild -version -sdk macosx10.12 Path >/dev/null 2>&1 ; then
                  mac_version_min="-mmacosx-version-min=10.4"
                  mac_sysroot="-isysroot `xcodebuild -version -sdk macosx10.12 Path`"
+              elif xcodebuild -version -sdk macosx10.13 Path >/dev/null 2>&1 ; then
+                 mac_version_min="-mmacosx-version-min=10.4"
+                 mac_sysroot="-isysroot `xcodebuild -version -sdk macosx10.13 Path`"
+              elif xcodebuild -version -sdk macosx10.14 Path >/dev/null 2>&1 ; then
+                 mac_version_min="-mmacosx-version-min=10.4"
+                 mac_sysroot="-isysroot `xcodebuild -version -sdk macosx10.14 Path`"
               else
-                 as_fn_error $? "Could not find 10.5 to 10.12 SDK." "$LINENO" 5
+                 as_fn_error $? "Could not find 10.5 to 10.14 SDK." "$LINENO" 5
               fi
            esac
 
                                  mac_arches=""
-           for arch in i386 x86_64 ppc ppc64
+           for arch in x86_64
            do
               save_CFLAGS="$CFLAGS"
               CFLAGS="$CFLAGS -arch $arch"

@@ -63,6 +63,9 @@
 
 #include <CoreAudio/CoreAudio.h>
 #include <CoreServices/CoreServices.h>
+#ifdef AUDIO_COMPONENT_FIX
+#include <AudioUnit/AudioComponent.h>
+#endif
 #include <AudioUnit/AudioUnit.h>
 #include <AudioToolbox/AudioToolbox.h>
 
@@ -139,8 +142,13 @@ typedef struct PaMacCoreStream
 
     /* implementation specific data goes here */
     bool bufferProcessorIsInitialized;
+#ifndef AUDIO_COMPONENT_FIX
     AudioUnit inputUnit;
     AudioUnit outputUnit;
+#else
+    AudioComponentInstance inputUnit;
+    AudioComponentInstance outputUnit;
+#endif
     AudioDeviceID inputDevice;
     AudioDeviceID outputDevice;
     size_t userInChan;

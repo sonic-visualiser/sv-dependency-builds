@@ -19,14 +19,11 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 // THE SOFTWARE.
 
-#ifndef CAPNP_ORPHAN_H_
-#define CAPNP_ORPHAN_H_
-
-#if defined(__GNUC__) && !defined(CAPNP_HEADER_WARNINGS)
-#pragma GCC system_header
-#endif
+#pragma once
 
 #include "layout.h"
+
+CAPNP_BEGIN_HEADER
 
 namespace capnp {
 
@@ -437,4 +434,4 @@ inline Orphan<Data> Orphanage::referenceExternalData(Data::Reader data) const {
 
 }  // namespace capnp
 
-#endif  // CAPNP_ORPHAN_H_
+CAPNP_END_HEADER

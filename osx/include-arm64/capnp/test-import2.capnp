@@ -1,4 +1,4 @@
-# Copyright (c) 2015 Sandstorm Development Group, Inc. and contributors
+# Copyright (c) 2013-2014 Sandstorm Development Group, Inc. and contributors
 # Licensed under the MIT License:
 #
 # Permission is hereby granted, free of charge, to any person obtaining a copy
@@ -19,40 +19,14 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 # THE SOFTWARE.
 
-@0x8ef99297a43a5e34;
+@0xc64a3bf0338a124a;
 
-$import "/capnp/c++.capnp".namespace("capnp");
+using Import1 = import "/capnp/schema.capnp";
+using Import2 = import "test-import.capnp";
+using Import3 = import "test.capnp";
 
-struct JsonValue {
-  union {
-    null @0 :Void;
-    boolean @1 :Bool;
-    number @2 :Float64;
-    string @3 :Text;
-    array @4 :List(JsonValue);
-    object @5 :List(Field);
-    # Standard JSON values.
-
-    call @6 :Call;
-    # Non-standard: A "function call", applying a named function (named by a single identifier)
-    # to a parameter list. Examples:
-    #
-    #     BinData(0, "Zm9vCg==")
-    #     ISODate("2015-04-15T08:44:50.218Z")
-    #
-    # Mongo DB users will recognize the above as exactly the syntax Mongo uses to represent BSON
-    # "binary" and "date" types in text, since JSON has no analog of these. This is basically the
-    # reason this extension exists. We do NOT recommend using `call` unless you specifically need
-    # to be compatible with some silly format that uses this syntax.
-  }
-
-  struct Field {
-    name @0 :Text;
-    value @1 :JsonValue;
-  }
-
-  struct Call {
-    function @0 :Text;
-    params @1 :List(JsonValue);
-  }
+struct TestImport2 {
+  foo @0 :Import3.TestAllTypes;
+  bar @1 :Import1.Node;
+  baz @2 :Import2.TestImport;
 }

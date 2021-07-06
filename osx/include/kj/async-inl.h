@@ -24,17 +24,16 @@
 //
 // Non-inline declarations here are defined in async.c++.
 
-#ifndef KJ_ASYNC_H_
+#pragma once
+
+#ifndef KJ_ASYNC_H_INCLUDED
 #error "Do not include this directly; include kj/async.h."
 #include "async.h"  // help IDE parse this file
 #endif
 
-#ifndef KJ_ASYNC_INL_H_
-#define KJ_ASYNC_INL_H_
+KJ_BEGIN_HEADER
 
-#if defined(__GNUC__) && !KJ_HEADER_WARNINGS
-#pragma GCC system_header
-#endif
+#include "list.h"
 
 namespace kj {
 namespace _ {  // private
@@ -79,12 +78,69 @@ public:
   Maybe<T> value;
 };
 
+template <typename T>
+inline T convertToReturn(ExceptionOr<T>&& result) {
+  KJ_IF_MAYBE(value, result.value) {
+    KJ_IF_MAYBE(exception, result.exception) {
+      throwRecoverableException(kj::mv(*exception));
+    }
+    return _::returnMaybeVoid(kj::mv(*value));
+  } else KJ_IF_MAYBE(exception, result.exception) {
+    throwFatalException(kj::mv(*exception));
+  } else {
+    // Result contained neither a value nor an exception?
+    KJ_UNREACHABLE;
+  }
+}
+
+inline void convertToReturn(ExceptionOr<Void>&& result) {
+  // Override <void> case to use throwRecoverableException().
+
+  if (result.value != nullptr) {
+    KJ_IF_MAYBE(exception, result.exception) {
+      throwRecoverableException(kj::mv(*exception));
+    }
+  } else KJ_IF_MAYBE(exception, result.exception) {
+    throwRecoverableException(kj::mv(*exception));
+  } else {
+    // Result contained neither a value nor an exception?
+    KJ_UNREACHABLE;
+  }
+}
+
+class TraceBuilder {
+  // Helper for methods that build a call trace.
+public:
+  TraceBuilder(ArrayPtr<void*> space)
+      : start(space.begin()), current(space.begin()), limit(space.end()) {}
+
+  inline void add(void* addr) {
+    if (current < limit) {
+      *current++ = addr;
+    }
+  }
+
+  inline bool full() const { return current == limit; }
+
+  ArrayPtr<void*> finish() {
+    return arrayPtr(start, current);
+  }
+
+  String toString();
+
+private:
+  void** start;
+  void** current;
+  void** limit;
+};
+
 class Event {
   // An event waiting to be executed.  Not for direct use by applications -- promises use this
   // internally.
 
 public:
   Event();
+  Event(kj::EventLoop& loop);
   ~Event() noexcept(false);
   KJ_DISALLOW_COPY(Event);
 
@@ -106,12 +162,25 @@ public:
   void armBreadthFirst();
   // Like `armDepthFirst()` except that the event is placed at the end of the queue.
 
-  kj::String trace();
-  // Dump debug info about this event.
+  void armLast();
+  // Enqueues this event to happen after all other events have run to completion and there is
+  // really nothing left to do except wait for I/O.
 
-  virtual _::PromiseNode* getInnerForTrace();
-  // If this event wraps a PromiseNode, get that node.  Used for debug tracing.
-  // Default implementation returns nullptr.
+  void disarm();
+  // If the event is armed but hasn't fired, cancel it. (Destroying the event does this
+  // implicitly.)
+
+  virtual void traceEvent(TraceBuilder& builder) = 0;
+  // Build a trace of the callers leading up to this event. `builder` will be populated with
+  // "return addresses" of the promise chain waiting on this event. The return addresses may
+  // actually the addresses of lambdas passed to .then(), but in any case, feeding them into
+  // addr2line should produce useful source code locations.
+  //
+  // `traceEvent()` may be called from an async signal handler while `fire()` is executing. It
+  // must not allocate nor take locks.
+
+  String traceEvent();
+  // Helper that builds a trace and stringifies it.
 
 protected:
   virtual Maybe<Own<Event>> fire() = 0;
@@ -136,8 +205,12 @@ class PromiseNode {
   // internal implementation details.
 
 public:
-  virtual void onReady(Event& event) noexcept = 0;
+  virtual void onReady(Event* event) noexcept = 0;
   // Arms the given event when ready.
+  //
+  // May be called multiple times. If called again before the event was armed, the old event will
+  // never be armed, only the new one. If called again after the event was armed, the new event
+  // will be armed immediately. Can be called with nullptr to un-register the existing event.
 
   virtual void setSelfPointer(Own<PromiseNode>* selfPtr) noexcept;
   // Tells the node that `selfPtr` is the pointer that owns this node, and will continue to own
@@ -150,21 +223,59 @@ public:
   // Can only be called once, and only after the node is ready.  Must be called directly from the
   // event loop, with no application code on the stack.
 
-  virtual PromiseNode* getInnerForTrace();
-  // If this node wraps some other PromiseNode, get the wrapped node.  Used for debug tracing.
-  // Default implementation returns nullptr.
+  virtual void tracePromise(TraceBuilder& builder, bool stopAtNextEvent) = 0;
+  // Build a trace of this promise chain, showing what it is currently waiting on.
+  //
+  // Since traces are ordered callee-before-caller, PromiseNode::tracePromise() should typically
+  // recurse to its child first, then after the child returns, add itself to the trace.
+  //
+  // If `stopAtNextEvent` is true, then the trace should stop as soon as it hits a PromiseNode that
+  // also implements Event, and should not trace that node or its children. This is used in
+  // conjuction with Event::traceEvent(). The chain of Events is often more sparse than the chain
+  // of PromiseNodes, because a TransformPromiseNode (which implements .then()) is not itself an
+  // Event. TransformPromiseNode instead tells its child node to directly notify its *parent* node
+  // when it is ready, and then TransformPromiseNode applies the .then() transformation during the
+  // call to .get().
+  //
+  // So, when we trace the chain of Events backwards, we end up hoping over segments of
+  // TransformPromiseNodes (and other similar types). In order to get those added to the trace,
+  // each Event must call back down the PromiseNode chain in the opposite direction, using this
+  // method.
+  //
+  // `tracePromise()` may be called from an async signal handler while `get()` is executing. It
+  // must not allocate nor take locks.
+
+  template <typename T>
+  static Own<PromiseNode> from(T&& promise) {
+    // Given a Promise, extract the PromiseNode.
+    return kj::mv(promise.node);
+  }
+  template <typename T>
+  static PromiseNode& from(T& promise) {
+    // Given a Promise, extract the PromiseNode.
+    return *promise.node;
+  }
+  template <typename T>
+  static T to(Own<PromiseNode>&& node) {
+    // Construct a Promise from a PromiseNode. (T should be a Promise type.)
+    return T(false, kj::mv(node));
+  }
 
 protected:
   class OnReadyEvent {
     // Helper class for implementing onReady().
 
   public:
-    void init(Event& newEvent);
-    // Returns true if arm() was already called.
+    void init(Event* newEvent);
 
     void arm();
-    // Arms the event if init() has already been called and makes future calls to init() return
-    // true.
+    void armBreadthFirst();
+    // Arms the event if init() has already been called and makes future calls to init()
+    // automatically arm the event.
+
+    inline void traceEvent(TraceBuilder& builder) {
+      if (event != nullptr && !builder.full()) event->traceEvent(builder);
+    }
 
   private:
     Event* event = nullptr;
@@ -173,12 +284,20 @@ protected:
 
 // -------------------------------------------------------------------
 
+template <typename T>
+inline NeverDone::operator Promise<T>() const {
+  return PromiseNode::to<Promise<T>>(neverDone());
+}
+
+// -------------------------------------------------------------------
+
 class ImmediatePromiseNodeBase: public PromiseNode {
 public:
   ImmediatePromiseNodeBase();
   ~ImmediatePromiseNodeBase() noexcept(false);
 
-  void onReady(Event& event) noexcept override;
+  void onReady(Event* event) noexcept override;
+  void tracePromise(TraceBuilder& builder, bool stopAtNextEvent) override;
 };
 
 template <typename T>
@@ -212,9 +331,9 @@ class AttachmentPromiseNodeBase: public PromiseNode {
 public:
   AttachmentPromiseNodeBase(Own<PromiseNode>&& dependency);
 
-  void onReady(Event& event) noexcept override;
+  void onReady(Event* event) noexcept override;
   void get(ExceptionOrValue& output) noexcept override;
-  PromiseNode* getInnerForTrace() override;
+  void tracePromise(TraceBuilder& builder, bool stopAtNextEvent) override;
 
 private:
   Own<PromiseNode> dependency;
@@ -247,12 +366,36 @@ private:
 
 // -------------------------------------------------------------------
 
+#if __GNUC__ >= 8 && !__clang__
+// GCC 8's class-memaccess warning rightly does not like the memcpy()'s below, but there's no
+// "legal" way for us to extract the contetn of a PTMF so too bad.
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wclass-memaccess"
+#endif
+
+template <typename T, typename ReturnType, typename... ParamTypes>
+void* getMethodStartAddress(T& obj, ReturnType (T::*method)(ParamTypes...));
+template <typename T, typename ReturnType, typename... ParamTypes>
+void* getMethodStartAddress(const T& obj, ReturnType (T::*method)(ParamTypes...) const);
+// Given an object and a pointer-to-method, return the start address of the method's code. The
+// intent is that this address can be used in a trace; addr2line should map it to the start of
+// the function's definition. For virtual methods, this does a vtable lookup on `obj` to determine
+// the address of the specific implementation (otherwise, `obj` wouldn't be needed).
+//
+// Note that if the method is overloaded or is a template, you will need to explicitly specify
+// the param and return types, otherwise the compiler won't know which overload / template
+// specialization you are requesting.
+
 class PtmfHelper {
-  // This class is a private helper for GetFunctorStartAddress. The class represents the internal
-  // representation of a pointer-to-member-function.
+  // This class is a private helper for GetFunctorStartAddress and getMethodStartAddress(). The
+  // class represents the internal representation of a pointer-to-member-function.
 
   template <typename... ParamTypes>
   friend struct GetFunctorStartAddress;
+  template <typename T, typename ReturnType, typename... ParamTypes>
+  friend void* getMethodStartAddress(T& obj, ReturnType (T::*method)(ParamTypes...));
+  template <typename T, typename ReturnType, typename... ParamTypes>
+  friend void* getMethodStartAddress(const T& obj, ReturnType (T::*method)(ParamTypes...) const);
 
 #if __GNUG__
 
@@ -260,7 +403,7 @@ class PtmfHelper {
   ptrdiff_t adj;
   // Layout of a pointer-to-member-function used by GCC and compatible compilers.
 
-  void* apply(void* obj) {
+  void* apply(const void* obj) {
 #if defined(__arm__) || defined(__mips__) || defined(__aarch64__)
     if (adj & 1) {
       ptrdiff_t voff = (ptrdiff_t)ptr;
@@ -283,7 +426,7 @@ class PtmfHelper {
 
 #else  // __GNUG__
 
-  void* apply(void* obj) { return nullptr; }
+  void* apply(const void* obj) { return nullptr; }
   // TODO(port):  PTMF instruction address extraction
 
 #define BODY return PtmfHelper{}
@@ -307,6 +450,19 @@ class PtmfHelper {
   // necessary to be precise about P.
 #undef BODY
 };
+
+#if __GNUC__ >= 8 && !__clang__
+#pragma GCC diagnostic pop
+#endif
+
+template <typename T, typename ReturnType, typename... ParamTypes>
+void* getMethodStartAddress(T& obj, ReturnType (T::*method)(ParamTypes...)) {
+  return PtmfHelper::from<ReturnType, T, ParamTypes...>(method).apply(&obj);
+}
+template <typename T, typename ReturnType, typename... ParamTypes>
+void* getMethodStartAddress(const T& obj, ReturnType (T::*method)(ParamTypes...) const) {
+  return PtmfHelper::from<ReturnType, T, ParamTypes...>(method).apply(&obj);
+}
 
 template <typename... ParamTypes>
 struct GetFunctorStartAddress {
@@ -338,9 +494,9 @@ class TransformPromiseNodeBase: public PromiseNode {
 public:
   TransformPromiseNodeBase(Own<PromiseNode>&& dependency, void* continuationTracePtr);
 
-  void onReady(Event& event) noexcept override;
+  void onReady(Event* event) noexcept override;
   void get(ExceptionOrValue& output) noexcept override;
-  PromiseNode* getInnerForTrace() override;
+  void tracePromise(TraceBuilder& builder, bool stopAtNextEvent) override;
 
 private:
   Own<PromiseNode> dependency;
@@ -361,9 +517,9 @@ class TransformPromiseNode final: public TransformPromiseNodeBase {
   // function (implements `then()`).
 
 public:
-  TransformPromiseNode(Own<PromiseNode>&& dependency, Func&& func, ErrorFunc&& errorHandler)
-      : TransformPromiseNodeBase(kj::mv(dependency),
-            GetFunctorStartAddress<DepT&&>::apply(func)),
+  TransformPromiseNode(Own<PromiseNode>&& dependency, Func&& func, ErrorFunc&& errorHandler,
+                       void* continuationTracePtr)
+      : TransformPromiseNodeBase(kj::mv(dependency), continuationTracePtr),
         func(kj::fwd<Func>(func)), errorHandler(kj::fwd<ErrorFunc>(errorHandler)) {}
 
   ~TransformPromiseNode() noexcept(false) {
@@ -410,8 +566,8 @@ public:
   // Called by the hub to indicate that it is ready.
 
   // implements PromiseNode ------------------------------------------
-  void onReady(Event& event) noexcept override;
-  PromiseNode* getInnerForTrace() override;
+  void onReady(Event* event) noexcept override;
+  void tracePromise(TraceBuilder& builder, bool stopAtNextEvent) override;
 
 protected:
   inline ExceptionOrValue& getHubResultRef();
@@ -431,6 +587,11 @@ private:
 
 template <typename T> T copyOrAddRef(T& t) { return t; }
 template <typename T> Own<T> copyOrAddRef(Own<T>& t) { return t->addRef(); }
+template <typename T> Maybe<Own<T>> copyOrAddRef(Maybe<Own<T>>& t) {
+  return t.map([](Own<T>& ptr) {
+    return ptr->addRef();
+  });
+}
 
 template <typename T>
 class ForkBranch final: public ForkBranchBase {
@@ -491,7 +652,7 @@ private:
   // Tail becomes null once the inner promise is ready and all branches have been notified.
 
   Maybe<Own<Event>> fire() override;
-  _::PromiseNode* getInnerForTrace() override;
+  void traceEvent(TraceBuilder& builder) override;
 
   friend class ForkBranchBase;
 };
@@ -506,7 +667,7 @@ public:
   ForkHub(Own<PromiseNode>&& inner): ForkHubBase(kj::mv(inner), result) {}
 
   Promise<_::UnfixVoid<T>> addBranch() {
-    return Promise<_::UnfixVoid<T>>(false, kj::heap<ForkBranch<T>>(addRef(*this)));
+    return _::PromiseNode::to<Promise<_::UnfixVoid<T>>>(kj::heap<ForkBranch<T>>(addRef(*this)));
   }
 
   _::SplitTuplePromise<T> split() {
@@ -522,10 +683,10 @@ private:
   }
 
   template <size_t index>
-  Promise<JoinPromises<typename SplitBranch<T, index>::Element>> addSplit() {
-    return Promise<JoinPromises<typename SplitBranch<T, index>::Element>>(
-        false, maybeChain(kj::heap<SplitBranch<T, index>>(addRef(*this)),
-                          implicitCast<typename SplitBranch<T, index>::Element*>(nullptr)));
+  ReducePromises<typename SplitBranch<T, index>::Element> addSplit() {
+    return _::PromiseNode::to<ReducePromises<typename SplitBranch<T, index>::Element>>(
+        maybeChain(kj::heap<SplitBranch<T, index>>(addRef(*this)),
+                   implicitCast<typename SplitBranch<T, index>::Element*>(nullptr)));
   }
 };
 
@@ -545,10 +706,10 @@ public:
   explicit ChainPromiseNode(Own<PromiseNode> inner);
   ~ChainPromiseNode() noexcept(false);
 
-  void onReady(Event& event) noexcept override;
+  void onReady(Event* event) noexcept override;
   void setSelfPointer(Own<PromiseNode>* selfPtr) noexcept override;
   void get(ExceptionOrValue& output) noexcept override;
-  PromiseNode* getInnerForTrace() override;
+  void tracePromise(TraceBuilder& builder, bool stopAtNextEvent) override;
 
 private:
   enum State {
@@ -566,6 +727,7 @@ private:
   Own<PromiseNode>* selfPtr = nullptr;
 
   Maybe<Own<Event>> fire() override;
+  void traceEvent(TraceBuilder& builder) override;
 };
 
 template <typename T>
@@ -578,6 +740,16 @@ Own<PromiseNode>&& maybeChain(Own<PromiseNode>&& node, T*) {
   return kj::mv(node);
 }
 
+template <typename T, typename Result = decltype(T::reducePromise(instance<Promise<T>>()))>
+inline Result maybeReduce(Promise<T>&& promise, bool) {
+  return T::reducePromise(kj::mv(promise));
+}
+
+template <typename T>
+inline Promise<T> maybeReduce(Promise<T>&& promise, ...) {
+  return kj::mv(promise);
+}
+
 // -------------------------------------------------------------------
 
 class ExclusiveJoinPromiseNode final: public PromiseNode {
@@ -585,9 +757,9 @@ public:
   ExclusiveJoinPromiseNode(Own<PromiseNode> left, Own<PromiseNode> right);
   ~ExclusiveJoinPromiseNode() noexcept(false);
 
-  void onReady(Event& event) noexcept override;
+  void onReady(Event* event) noexcept override;
   void get(ExceptionOrValue& output) noexcept override;
-  PromiseNode* getInnerForTrace() override;
+  void tracePromise(TraceBuilder& builder, bool stopAtNextEvent) override;
 
 private:
   class Branch: public Event {
@@ -599,11 +771,13 @@ private:
     // Returns true if this is the side that finished.
 
     Maybe<Own<Event>> fire() override;
-    _::PromiseNode* getInnerForTrace() override;
+    void traceEvent(TraceBuilder& builder) override;
 
   private:
     ExclusiveJoinPromiseNode& joinNode;
     Own<PromiseNode> dependency;
+
+    friend class ExclusiveJoinPromiseNode;
   };
 
   Branch left;
@@ -619,9 +793,9 @@ public:
                            ExceptionOrValue* resultParts, size_t partSize);
   ~ArrayJoinPromiseNodeBase() noexcept(false);
 
-  void onReady(Event& event) noexcept override final;
+  void onReady(Event* event) noexcept override final;
   void get(ExceptionOrValue& output) noexcept override final;
-  PromiseNode* getInnerForTrace() override final;
+  void tracePromise(TraceBuilder& builder, bool stopAtNextEvent) override final;
 
 protected:
   virtual void getNoError(ExceptionOrValue& output) noexcept = 0;
@@ -638,7 +812,7 @@ private:
     ~Branch() noexcept(false);
 
     Maybe<Own<Event>> fire() override;
-    _::PromiseNode* getInnerForTrace() override;
+    void traceEvent(TraceBuilder& builder) override;
 
     Maybe<Exception> getPart();
     // Calls dependency->get(output).  If there was an exception, return it.
@@ -647,6 +821,8 @@ private:
     ArrayJoinPromiseNodeBase& joinNode;
     Own<PromiseNode> dependency;
     ExceptionOrValue& output;
+
+    friend class ArrayJoinPromiseNodeBase;
   };
 
   Array<Branch> branches;
@@ -698,8 +874,8 @@ class EagerPromiseNodeBase: public PromiseNode, protected Event {
 public:
   EagerPromiseNodeBase(Own<PromiseNode>&& dependency, ExceptionOrValue& resultRef);
 
-  void onReady(Event& event) noexcept override;
-  PromiseNode* getInnerForTrace() override;
+  void onReady(Event* event) noexcept override;
+  void tracePromise(TraceBuilder& builder, bool stopAtNextEvent) override;
 
 private:
   Own<PromiseNode> dependency;
@@ -708,6 +884,7 @@ private:
   ExceptionOrValue& resultRef;
 
   Maybe<Own<Event>> fire() override;
+  void traceEvent(TraceBuilder& builder) override;
 };
 
 template <typename T>
@@ -735,7 +912,8 @@ Own<PromiseNode> spark(Own<PromiseNode>&& node) {
 
 class AdapterPromiseNodeBase: public PromiseNode {
 public:
-  void onReady(Event& event) noexcept override;
+  void onReady(Event* event) noexcept override;
+  void tracePromise(TraceBuilder& builder, bool stopAtNextEvent) override;
 
 protected:
   inline void setReady() {
@@ -787,6 +965,73 @@ private:
   }
 };
 
+// -------------------------------------------------------------------
+
+class FiberBase: public PromiseNode, private Event {
+  // Base class for the outer PromiseNode representing a fiber.
+
+public:
+  explicit FiberBase(size_t stackSize, _::ExceptionOrValue& result);
+  explicit FiberBase(const FiberPool& pool, _::ExceptionOrValue& result);
+  ~FiberBase() noexcept(false);
+
+  void start() { armDepthFirst(); }
+  // Call immediately after construction to begin executing the fiber.
+
+  class WaitDoneEvent;
+
+  void onReady(_::Event* event) noexcept override;
+  void tracePromise(TraceBuilder& builder, bool stopAtNextEvent) override;
+
+protected:
+  bool isFinished() { return state == FINISHED; }
+  void destroy();
+
+private:
+  enum { WAITING, RUNNING, CANCELED, FINISHED } state;
+
+  _::PromiseNode* currentInner = nullptr;
+  OnReadyEvent onReadyEvent;
+  Own<FiberStack> stack;
+  _::ExceptionOrValue& result;
+
+  void run();
+  virtual void runImpl(WaitScope& waitScope) = 0;
+
+  Maybe<Own<Event>> fire() override;
+  void traceEvent(TraceBuilder& builder) override;
+  // Implements Event. Each time the event is fired, switchToFiber() is called.
+
+  friend class FiberStack;
+  friend void _::waitImpl(Own<_::PromiseNode>&& node, _::ExceptionOrValue& result,
+                          WaitScope& waitScope);
+  friend bool _::pollImpl(_::PromiseNode& node, WaitScope& waitScope);
+};
+
+template <typename Func>
+class Fiber final: public FiberBase {
+public:
+  explicit Fiber(size_t stackSize, Func&& func): FiberBase(stackSize, result), func(kj::fwd<Func>(func)) {}
+  explicit Fiber(const FiberPool& pool, Func&& func): FiberBase(pool, result), func(kj::fwd<Func>(func)) {}
+  ~Fiber() noexcept(false) { destroy(); }
+
+  typedef FixVoid<decltype(kj::instance<Func&>()(kj::instance<WaitScope&>()))> ResultType;
+
+  void get(ExceptionOrValue& output) noexcept override {
+    KJ_IREQUIRE(isFinished());
+    output.as<ResultType>() = kj::mv(result);
+  }
+
+private:
+  Func func;
+  ExceptionOr<ResultType> result;
+
+  void runImpl(WaitScope& waitScope) override {
+    result.template as<ResultType>() =
+        MaybeVoidCaller<WaitScope&, ResultType>::apply(func, waitScope);
+  }
+};
+
 }  // namespace _ (private)
 
 // =======================================================================================
@@ -804,11 +1049,14 @@ template <typename Func, typename ErrorFunc>
 PromiseForResult<Func, T> Promise<T>::then(Func&& func, ErrorFunc&& errorHandler) {
   typedef _::FixVoid<_::ReturnType<Func, T>> ResultT;
 
+  void* continuationTracePtr = _::GetFunctorStartAddress<_::FixVoid<T>&&>::apply(func);
   Own<_::PromiseNode> intermediate =
       heap<_::TransformPromiseNode<ResultT, _::FixVoid<T>, Func, ErrorFunc>>(
-          kj::mv(node), kj::fwd<Func>(func), kj::fwd<ErrorFunc>(errorHandler));
-  return PromiseForResult<Func, T>(false,
+          kj::mv(node), kj::fwd<Func>(func), kj::fwd<ErrorFunc>(errorHandler),
+          continuationTracePtr);
+  auto result = _::PromiseNode::to<_::ChainPromises<_::ReturnType<Func, T>>>(
       _::maybeChain(kj::mv(intermediate), implicitCast<ResultT*>(nullptr)));
+  return _::maybeReduce(kj::mv(result), false);
 }
 
 namespace _ {  // private
@@ -846,47 +1094,30 @@ Promise<T> Promise<T>::catch_(ErrorFunc&& errorHandler) {
   // Func is being filled in automatically. We want to make sure ErrorFunc can return a Promise,
   // but we don't want the extra overhead of promise chaining if ErrorFunc doesn't actually
   // return a promise. So we make our Func return match ErrorFunc.
-  return then(_::IdentityFunc<decltype(errorHandler(instance<Exception&&>()))>(),
-              kj::fwd<ErrorFunc>(errorHandler));
+  typedef _::IdentityFunc<decltype(errorHandler(instance<Exception&&>()))> Func;
+  typedef _::FixVoid<_::ReturnType<Func, T>> ResultT;
+
+  // The reason catch_() isn't simply implemented in terms of then() is because we want the trace
+  // pointer to be based on ErrorFunc rather than Func.
+  void* continuationTracePtr = _::GetFunctorStartAddress<kj::Exception&&>::apply(errorHandler);
+  Own<_::PromiseNode> intermediate =
+      heap<_::TransformPromiseNode<ResultT, _::FixVoid<T>, Func, ErrorFunc>>(
+          kj::mv(node), Func(), kj::fwd<ErrorFunc>(errorHandler), continuationTracePtr);
+  auto result = _::PromiseNode::to<_::ChainPromises<_::ReturnType<Func, T>>>(
+      _::maybeChain(kj::mv(intermediate), implicitCast<ResultT*>(nullptr)));
+  return _::maybeReduce(kj::mv(result), false);
 }
 
 template <typename T>
 T Promise<T>::wait(WaitScope& waitScope) {
   _::ExceptionOr<_::FixVoid<T>> result;
-
-  waitImpl(kj::mv(node), result, waitScope);
-
-  KJ_IF_MAYBE(value, result.value) {
-    KJ_IF_MAYBE(exception, result.exception) {
-      throwRecoverableException(kj::mv(*exception));
-    }
-    return _::returnMaybeVoid(kj::mv(*value));
-  } else KJ_IF_MAYBE(exception, result.exception) {
-    throwFatalException(kj::mv(*exception));
-  } else {
-    // Result contained neither a value nor an exception?
-    KJ_UNREACHABLE;
-  }
+  _::waitImpl(kj::mv(node), result, waitScope);
+  return convertToReturn(kj::mv(result));
 }
 
-template <>
-inline void Promise<void>::wait(WaitScope& waitScope) {
-  // Override <void> case to use throwRecoverableException().
-
-  _::ExceptionOr<_::Void> result;
-
-  waitImpl(kj::mv(node), result, waitScope);
-
-  if (result.value != nullptr) {
-    KJ_IF_MAYBE(exception, result.exception) {
-      throwRecoverableException(kj::mv(*exception));
-    }
-  } else KJ_IF_MAYBE(exception, result.exception) {
-    throwRecoverableException(kj::mv(*exception));
-  } else {
-    // Result contained neither a value nor an exception?
-    KJ_UNREACHABLE;
-  }
+template <typename T>
+bool Promise<T>::poll(WaitScope& waitScope) {
+  return _::pollImpl(*node, waitScope);
 }
 
 template <typename T>
@@ -897,6 +1128,11 @@ ForkedPromise<T> Promise<T>::fork() {
 template <typename T>
 Promise<T> ForkedPromise<T>::addBranch() {
   return hub->addBranch();
+}
+
+template <typename T>
+bool ForkedPromise<T>::hasBranches() {
+  return hub->isShared();
 }
 
 template <typename T>
@@ -941,6 +1177,11 @@ inline PromiseForResult<Func, void> evalLater(Func&& func) {
 }
 
 template <typename Func>
+inline PromiseForResult<Func, void> evalLast(Func&& func) {
+  return _::yieldHarder().then(kj::fwd<Func>(func), _::PropagateException());
+}
+
+template <typename Func>
 inline PromiseForResult<Func, void> evalNow(Func&& func) {
   PromiseForResult<Func, void> result = nullptr;
   KJ_IF_MAYBE(e, kj::runCatchingExceptions([&]() {
@@ -949,6 +1190,64 @@ inline PromiseForResult<Func, void> evalNow(Func&& func) {
     result = kj::mv(*e);
   }
   return result;
+}
+
+template <typename Func>
+struct RetryOnDisconnect_ {
+  static inline PromiseForResult<Func, void> apply(Func&& func) {
+    return evalLater([func = kj::mv(func)]() mutable -> PromiseForResult<Func, void> {
+      auto promise = evalNow(func);
+      return promise.catch_([func = kj::mv(func)](kj::Exception&& e) mutable -> PromiseForResult<Func, void> {
+        if (e.getType() == kj::Exception::Type::DISCONNECTED) {
+          return func();
+        } else {
+          return kj::mv(e);
+        }
+      });
+    });
+  }
+};
+template <typename Func>
+struct RetryOnDisconnect_<Func&> {
+  // Specialization for references. Needed because the syntax for capturing references in a
+  // lambda is different. :(
+  static inline PromiseForResult<Func, void> apply(Func& func) {
+    auto promise = evalLater(func);
+    return promise.catch_([&func](kj::Exception&& e) -> PromiseForResult<Func, void> {
+      if (e.getType() == kj::Exception::Type::DISCONNECTED) {
+        return func();
+      } else {
+        return kj::mv(e);
+      }
+    });
+  }
+};
+
+template <typename Func>
+inline PromiseForResult<Func, void> retryOnDisconnect(Func&& func) {
+  return RetryOnDisconnect_<Func>::apply(kj::fwd<Func>(func));
+}
+
+template <typename Func>
+inline PromiseForResult<Func, WaitScope&> startFiber(size_t stackSize, Func&& func) {
+  typedef _::FixVoid<_::ReturnType<Func, WaitScope&>> ResultT;
+
+  Own<_::FiberBase> intermediate = kj::heap<_::Fiber<Func>>(stackSize, kj::fwd<Func>(func));
+  intermediate->start();
+  auto result = _::PromiseNode::to<_::ChainPromises<_::ReturnType<Func, WaitScope&>>>(
+      _::maybeChain(kj::mv(intermediate), implicitCast<ResultT*>(nullptr)));
+  return _::maybeReduce(kj::mv(result), false);
+}
+
+template <typename Func>
+inline PromiseForResult<Func, WaitScope&> FiberPool::startFiber(Func&& func) const {
+  typedef _::FixVoid<_::ReturnType<Func, WaitScope&>> ResultT;
+
+  Own<_::FiberBase> intermediate = kj::heap<_::Fiber<Func>>(*this, kj::fwd<Func>(func));
+  intermediate->start();
+  auto result = _::PromiseNode::to<_::ChainPromises<_::ReturnType<Func, WaitScope&>>>(
+      _::maybeChain(kj::mv(intermediate), implicitCast<ResultT*>(nullptr)));
+  return _::maybeReduce(kj::mv(result), false);
 }
 
 template <typename T>
@@ -965,8 +1264,8 @@ void Promise<void>::detach(ErrorFunc&& errorHandler) {
 
 template <typename T>
 Promise<Array<T>> joinPromises(Array<Promise<T>>&& promises) {
-  return Promise<Array<T>>(false, kj::heap<_::ArrayJoinPromiseNode<T>>(
-      KJ_MAP(p, promises) { return kj::mv(p.node); },
+  return _::PromiseNode::to<Promise<Array<T>>>(kj::heap<_::ArrayJoinPromiseNode<T>>(
+      KJ_MAP(p, promises) { return _::PromiseNode::from(kj::mv(p)); },
       heapArray<_::ExceptionOr<T>>(promises.size())));
 }
 
@@ -974,8 +1273,28 @@ Promise<Array<T>> joinPromises(Array<Promise<T>>&& promises) {
 
 namespace _ {  // private
 
+class WeakFulfillerBase: protected kj::Disposer {
+protected:
+  WeakFulfillerBase(): inner(nullptr) {}
+  virtual ~WeakFulfillerBase() noexcept(false) {}
+
+  template <typename T>
+  inline PromiseFulfiller<T>* getInner() {
+    return static_cast<PromiseFulfiller<T>*>(inner);
+  };
+  template <typename T>
+  inline void setInner(PromiseFulfiller<T>* ptr) {
+    inner = ptr;
+  };
+
+private:
+  mutable PromiseRejector* inner;
+
+  void disposeImpl(void* pointer) const override;
+};
+
 template <typename T>
-class WeakFulfiller final: public PromiseFulfiller<T>, private kj::Disposer {
+class WeakFulfiller final: public PromiseFulfiller<T>, public WeakFulfillerBase {
   // A wrapper around PromiseFulfiller which can be detached.
   //
   // There are a couple non-trivialities here:
@@ -998,54 +1317,37 @@ public:
   }
 
   void fulfill(FixVoid<T>&& value) override {
-    if (inner != nullptr) {
-      inner->fulfill(kj::mv(value));
+    if (getInner<T>() != nullptr) {
+      getInner<T>()->fulfill(kj::mv(value));
     }
   }
 
   void reject(Exception&& exception) override {
-    if (inner != nullptr) {
-      inner->reject(kj::mv(exception));
+    if (getInner<T>() != nullptr) {
+      getInner<T>()->reject(kj::mv(exception));
     }
   }
 
   bool isWaiting() override {
-    return inner != nullptr && inner->isWaiting();
+    return getInner<T>() != nullptr && getInner<T>()->isWaiting();
   }
 
   void attach(PromiseFulfiller<T>& newInner) {
-    inner = &newInner;
+    setInner<T>(&newInner);
   }
 
   void detach(PromiseFulfiller<T>& from) {
-    if (inner == nullptr) {
+    if (getInner<T>() == nullptr) {
       // Already disposed.
       delete this;
     } else {
-      KJ_IREQUIRE(inner == &from);
-      inner = nullptr;
+      KJ_IREQUIRE(getInner<T>() == &from);
+      setInner<T>(nullptr);
     }
   }
 
 private:
-  mutable PromiseFulfiller<T>* inner;
-
-  WeakFulfiller(): inner(nullptr) {}
-
-  void disposeImpl(void* pointer) const override {
-    // TODO(perf): Factor some of this out so it isn't regenerated for every fulfiller type?
-
-    if (inner == nullptr) {
-      // Already detached.
-      delete this;
-    } else {
-      if (inner->isWaiting()) {
-        inner->reject(kj::Exception(kj::Exception::Type::FAILED, __FILE__, __LINE__,
-            kj::heapString("PromiseFulfiller was destroyed without fulfilling the promise.")));
-      }
-      inner = nullptr;
-    }
-  }
+  WeakFulfiller() {}
 };
 
 template <typename T>
@@ -1090,9 +1392,12 @@ bool PromiseFulfiller<void>::rejectIfThrows(Func&& func) {
 }
 
 template <typename T, typename Adapter, typename... Params>
-Promise<T> newAdaptedPromise(Params&&... adapterConstructorParams) {
-  return Promise<T>(false, heap<_::AdapterPromiseNode<_::FixVoid<T>, Adapter>>(
-      kj::fwd<Params>(adapterConstructorParams)...));
+_::ReducePromises<T> newAdaptedPromise(Params&&... adapterConstructorParams) {
+  Own<_::PromiseNode> intermediate(
+      heap<_::AdapterPromiseNode<_::FixVoid<T>, Adapter>>(
+          kj::fwd<Params>(adapterConstructorParams)...));
+  return _::PromiseNode::to<_::ReducePromises<T>>(
+      _::maybeChain(kj::mv(intermediate), implicitCast<T*>(nullptr)));
 }
 
 template <typename T>
@@ -1101,12 +1406,360 @@ PromiseFulfillerPair<T> newPromiseAndFulfiller() {
 
   Own<_::PromiseNode> intermediate(
       heap<_::AdapterPromiseNode<_::FixVoid<T>, _::PromiseAndFulfillerAdapter<T>>>(*wrapper));
-  Promise<_::JoinPromises<T>> promise(false,
+  auto promise = _::PromiseNode::to<_::ReducePromises<T>>(
       _::maybeChain(kj::mv(intermediate), implicitCast<T*>(nullptr)));
 
   return PromiseFulfillerPair<T> { kj::mv(promise), kj::mv(wrapper) };
 }
 
+// =======================================================================================
+// cross-thread stuff
+
+namespace _ {  // (private)
+
+class XThreadEvent: private Event,         // it's an event in the target thread
+                    public PromiseNode {   // it's a PromiseNode in the requesting thread
+public:
+  XThreadEvent(ExceptionOrValue& result, const Executor& targetExecutor, void* funcTracePtr);
+
+  void tracePromise(TraceBuilder& builder, bool stopAtNextEvent) override;
+
+protected:
+  void ensureDoneOrCanceled();
+  // MUST be called in destructor of subclasses to make sure the object is not destroyed while
+  // still being accessed by the other thread. (This can't be placed in ~XThreadEvent() because
+  // that destructor doesn't run until the subclass has already been destroyed.)
+
+  virtual kj::Maybe<Own<PromiseNode>> execute() = 0;
+  // Run the function. If the function returns a promise, returns the inner PromiseNode, otherwise
+  // returns null.
+
+  // implements PromiseNode ----------------------------------------------------
+  void onReady(Event* event) noexcept override;
+
+private:
+  ExceptionOrValue& result;
+  void* funcTracePtr;
+
+  kj::Own<const Executor> targetExecutor;
+  Maybe<const Executor&> replyExecutor;  // If executeAsync() was used.
+
+  kj::Maybe<Own<PromiseNode>> promiseNode;
+  // Accessed only in target thread.
+
+  ListLink<XThreadEvent> targetLink;
+  // Membership in one of the linked lists in the target Executor's work list or cancel list. These
+  // fields are protected by the target Executor's mutex.
+
+  enum {
+    UNUSED,
+    // Object was never queued on another thread.
+
+    QUEUED,
+    // Target thread has not yet dequeued the event from the state.start list. The requesting
+    // thread can cancel execution by removing the event from the list.
+
+    EXECUTING,
+    // Target thread has dequeued the event from state.start and moved it to state.executing. To
+    // cancel, the requesting thread must add the event to the state.cancel list and change the
+    // state to CANCELING.
+
+    CANCELING,
+    // Requesting thread is trying to cancel this event. The target thread will change the state to
+    // `DONE` once canceled.
+
+    DONE
+    // Target thread has completed handling this event and will not touch it again. The requesting
+    // thread can safely delete the object. The `state` is updated to `DONE` using an atomic
+    // release operation after ensuring that the event will not be touched again, so that the
+    // requesting can safely skip locking if it observes the state is already DONE.
+  } state = UNUSED;
+  // State, which is also protected by `targetExecutor`'s mutex.
+
+  ListLink<XThreadEvent> replyLink;
+  // Membership in `replyExecutor`'s reply list. Protected by `replyExecutor`'s mutex. The
+  // executing thread places the event in the reply list near the end of the `EXECUTING` state.
+  // Because the thread cannot lock two mutexes at once, it's possible that the reply executor
+  // will receive the reply while the event is still listed in the EXECUTING state, but it can
+  // ignore the state and proceed with the result.
+
+  OnReadyEvent onReadyEvent;
+  // Accessed only in requesting thread.
+
+  friend class kj::Executor;
+
+  void done();
+  // Sets the state to `DONE` and notifies the originating thread that this event is done. Do NOT
+  // call under lock.
+
+  void sendReply();
+  // Notifies the originating thread that this event is done, but doesn't set the state to DONE
+  // yet. Do NOT call under lock.
+
+  void setDoneState();
+  // Assigns `state` to `DONE`, being careful to use an atomic-release-store if needed. This must
+  // only be called in the destination thread, and must either be called under lock, or the thread
+  // must take the lock and release it again shortly after setting the state (because some threads
+  // may be waiting on the DONE state using a conditional wait on the mutex). After calling
+  // setDoneState(), the destination thread MUST NOT touch this object ever again; it now belongs
+  // solely to the requesting thread.
+
+  void setDisconnected();
+  // Sets the result to a DISCONNECTED exception indicating that the target event loop exited.
+
+  class DelayedDoneHack;
+
+  // implements Event ----------------------------------------------------------
+  Maybe<Own<Event>> fire() override;
+  // If called with promiseNode == nullptr, it's time to call execute(). If promiseNode != nullptr,
+  // then it just indicated readiness and we need to get its result.
+
+  void traceEvent(TraceBuilder& builder) override;
+};
+
+template <typename Func, typename = _::FixVoid<_::ReturnType<Func, void>>>
+class XThreadEventImpl final: public XThreadEvent {
+  // Implementation for a function that does not return a Promise.
+public:
+  XThreadEventImpl(Func&& func, const Executor& target)
+      : XThreadEvent(result, target, GetFunctorStartAddress<>::apply(func)),
+        func(kj::fwd<Func>(func)) {}
+  ~XThreadEventImpl() noexcept(false) { ensureDoneOrCanceled(); }
+
+  typedef _::FixVoid<_::ReturnType<Func, void>> ResultT;
+
+  kj::Maybe<Own<_::PromiseNode>> execute() override {
+    result.value = MaybeVoidCaller<Void, FixVoid<decltype(func())>>::apply(func, Void());
+    return nullptr;
+  }
+
+  // implements PromiseNode ----------------------------------------------------
+  void get(ExceptionOrValue& output) noexcept override {
+    output.as<ResultT>() = kj::mv(result);
+  }
+
+private:
+  Func func;
+  ExceptionOr<ResultT> result;
+  friend Executor;
+};
+
+template <typename Func, typename T>
+class XThreadEventImpl<Func, Promise<T>> final: public XThreadEvent {
+  // Implementation for a function that DOES return a Promise.
+public:
+  XThreadEventImpl(Func&& func, const Executor& target)
+      : XThreadEvent(result, target, GetFunctorStartAddress<>::apply(func)),
+        func(kj::fwd<Func>(func)) {}
+  ~XThreadEventImpl() noexcept(false) { ensureDoneOrCanceled(); }
+
+  typedef _::FixVoid<_::UnwrapPromise<PromiseForResult<Func, void>>> ResultT;
+
+  kj::Maybe<Own<_::PromiseNode>> execute() override {
+    auto result = _::PromiseNode::from(func());
+    KJ_IREQUIRE(result.get() != nullptr);
+    return kj::mv(result);
+  }
+
+  // implements PromiseNode ----------------------------------------------------
+  void get(ExceptionOrValue& output) noexcept override {
+    output.as<ResultT>() = kj::mv(result);
+  }
+
+private:
+  Func func;
+  ExceptionOr<ResultT> result;
+  friend Executor;
+};
+
+}  // namespace _ (private)
+
+template <typename Func>
+_::UnwrapPromise<PromiseForResult<Func, void>> Executor::executeSync(Func&& func) const {
+  _::XThreadEventImpl<Func> event(kj::fwd<Func>(func), *this);
+  send(event, true);
+  return convertToReturn(kj::mv(event.result));
+}
+
+template <typename Func>
+PromiseForResult<Func, void> Executor::executeAsync(Func&& func) const {
+  auto event = kj::heap<_::XThreadEventImpl<Func>>(kj::fwd<Func>(func), *this);
+  send(*event, false);
+  return _::PromiseNode::to<PromiseForResult<Func, void>>(kj::mv(event));
+}
+
+// -----------------------------------------------------------------------------
+
+namespace _ {  // (private)
+
+template <typename T>
+class XThreadFulfiller;
+
+class XThreadPaf: public PromiseNode {
+public:
+  XThreadPaf();
+  virtual ~XThreadPaf() noexcept(false);
+
+  class Disposer: public kj::Disposer {
+  public:
+    void disposeImpl(void* pointer) const override;
+  };
+  static const Disposer DISPOSER;
+
+  // implements PromiseNode ----------------------------------------------------
+  void onReady(Event* event) noexcept override;
+  void tracePromise(TraceBuilder& builder, bool stopAtNextEvent) override;
+
+private:
+  enum {
+    WAITING,
+    // Not yet fulfilled, and the waiter is still waiting.
+    //
+    // Starting from this state, the state may transition to either FULFILLING or CANCELED
+    // using an atomic compare-and-swap.
+
+    FULFILLING,
+    // The fulfiller thread atomically transitions the state from WAITING to FULFILLING when it
+    // wishes to fulfill the promise. By doing so, it guarantees that the `executor` will not
+    // disappear out from under it. It then fills in the result value, locks the executor mutex,
+    // adds the object to the executor's list of fulfilled XThreadPafs, changes the state to
+    // FULFILLED, and finally unlocks the mutex.
+    //
+    // If the waiting thread tries to cancel but discovers the object in this state, then it
+    // must perform a conditional wait on the executor mutex to await the state becoming FULFILLED.
+    // It can then delete the object.
+
+    FULFILLED,
+    // The fulfilling thread has completed filling in the result value and inserting the object
+    // into the waiting thread's executor event queue. Moreover, the fulfilling thread no longer
+    // holds any pointers to this object. The waiting thread is responsible for deleting it.
+
+    DISPATCHED,
+    // The object reached FULFILLED state, and then was dispatched from the waiting thread's
+    // executor's event queue. Therefore, the object is completely owned by the waiting thread with
+    // no need to lock anything.
+
+    CANCELED
+    // The waiting thread atomically transitions the state from WAITING to CANCELED if it is no
+    // longer listening. In this state, it is the fulfiller thread's responsibility to destroy the
+    // object.
+  } state;
+
+  const Executor& executor;
+  // Executor of the waiting thread. Only guaranteed to be valid when state is `WAITING` or
+  // `FULFILLING`. After any other state has been reached, this reference may be invalidated.
+
+  ListLink<XThreadPaf> link;
+  // In the FULFILLING/FULFILLED states, the object is placed in a linked list within the waiting
+  // thread's executor. In those states, these pointers are guarded by said executor's mutex.
+
+  OnReadyEvent onReadyEvent;
+
+  class FulfillScope;
+
+  static kj::Exception unfulfilledException();
+  // Construct appropriate exception to use to reject an unfulfilled XThreadPaf.
+
+  template <typename T>
+  friend class XThreadFulfiller;
+  friend Executor;
+};
+
+template <typename T>
+class XThreadPafImpl final: public XThreadPaf {
+public:
+  // implements PromiseNode ----------------------------------------------------
+  void get(ExceptionOrValue& output) noexcept override {
+    output.as<FixVoid<T>>() = kj::mv(result);
+  }
+
+private:
+  ExceptionOr<FixVoid<T>> result;
+
+  friend class XThreadFulfiller<T>;
+};
+
+class XThreadPaf::FulfillScope {
+  // Create on stack while setting `XThreadPafImpl<T>::result`.
+  //
+  // This ensures that:
+  // - Only one call is carried out, even if multiple threads try to fulfill concurrently.
+  // - The waiting thread is correctly signaled.
+public:
+  FulfillScope(XThreadPaf** pointer);
+  // Atomically nulls out *pointer and takes ownership of the pointer.
+
+  ~FulfillScope() noexcept(false);
+
+  KJ_DISALLOW_COPY(FulfillScope);
+
+  bool shouldFulfill() { return obj != nullptr; }
+
+  template <typename T>
+  XThreadPafImpl<T>* getTarget() { return static_cast<XThreadPafImpl<T>*>(obj); }
+
+private:
+  XThreadPaf* obj;
+};
+
+template <typename T>
+class XThreadFulfiller final: public CrossThreadPromiseFulfiller<T> {
+public:
+  XThreadFulfiller(XThreadPafImpl<T>* target): target(target) {}
+
+  ~XThreadFulfiller() noexcept(false) {
+    if (target != nullptr) {
+      reject(XThreadPaf::unfulfilledException());
+    }
+  }
+  void fulfill(FixVoid<T>&& value) const override {
+    XThreadPaf::FulfillScope scope(&target);
+    if (scope.shouldFulfill()) {
+      scope.getTarget<T>()->result = kj::mv(value);
+    }
+  }
+  void reject(Exception&& exception) const override {
+    XThreadPaf::FulfillScope scope(&target);
+    if (scope.shouldFulfill()) {
+      scope.getTarget<T>()->result.addException(kj::mv(exception));
+    }
+  }
+  bool isWaiting() const override {
+    KJ_IF_MAYBE(t, target) {
+#if _MSC_VER && !__clang__
+      // Just assume 1-byte loads are atomic... on what kind of absurd platform would they not be?
+      return t->state == XThreadPaf::WAITING;
+#else
+      return __atomic_load_n(&t->state, __ATOMIC_RELAXED) == XThreadPaf::WAITING;
+#endif
+    } else {
+      return false;
+    }
+  }
+
+private:
+  mutable XThreadPaf* target;  // accessed using atomic ops
+};
+
+template <typename T>
+class XThreadFulfiller<kj::Promise<T>> {
+public:
+  static_assert(sizeof(T) < 0,
+      "newCrosssThreadPromiseAndFulfiller<Promise<T>>() is not currently supported");
+  // TODO(someday): Is this worth supporting? Presumably, when someone calls `fulfill(somePromise)`,
+  //   then `somePromise` should be assumed to be a promise owned by the fulfilling thread, not
+  //   the waiting thread.
+};
+
+}  // namespace _ (private)
+
+template <typename T>
+PromiseCrossThreadFulfillerPair<T> newPromiseAndCrossThreadFulfiller() {
+  kj::Own<_::XThreadPafImpl<T>> node(new _::XThreadPafImpl<T>, _::XThreadPaf::DISPOSER);
+  auto fulfiller = kj::heap<_::XThreadFulfiller<T>>(node);
+  return { _::PromiseNode::to<_::ReducePromises<T>>(kj::mv(node)), kj::mv(fulfiller) };
+}
+
 }  // namespace kj
 
-#endif  // KJ_ASYNC_INL_H_
+KJ_END_HEADER

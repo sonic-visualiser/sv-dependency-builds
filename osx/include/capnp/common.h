@@ -23,25 +23,31 @@
 // time, but should then be optimized down to basic primitives (usually, integers) by the
 // compiler.
 
-#ifndef CAPNP_COMMON_H_
-#define CAPNP_COMMON_H_
-
-#if defined(__GNUC__) && !defined(CAPNP_HEADER_WARNINGS)
-#pragma GCC system_header
-#endif
+#pragma once
 
 #include <inttypes.h>
 #include <kj/string.h>
 #include <kj/memory.h>
+#include <kj/windows-sanity.h>  // work-around macro conflict with `VOID`
 
 #if CAPNP_DEBUG_TYPES
 #include <kj/units.h>
 #endif
 
+#if !defined(CAPNP_HEADER_WARNINGS) || !CAPNP_HEADER_WARNINGS
+#define CAPNP_BEGIN_HEADER KJ_BEGIN_SYSTEM_HEADER
+#define CAPNP_END_HEADER KJ_END_SYSTEM_HEADER
+#else
+#define CAPNP_BEGIN_HEADER
+#define CAPNP_END_HEADER
+#endif
+
+CAPNP_BEGIN_HEADER
+
 namespace capnp {
 
 #define CAPNP_VERSION_MAJOR 0
-#define CAPNP_VERSION_MINOR 6
+#define CAPNP_VERSION_MINOR 9
 #define CAPNP_VERSION_MICRO 0
 
 #define CAPNP_VERSION \
@@ -49,6 +55,12 @@ namespace capnp {
 
 #ifndef CAPNP_LITE
 #define CAPNP_LITE 0
+#endif
+
+#if CAPNP_TESTING_CAPNP  // defined in Cap'n Proto's own unit tests; others should not define this
+#define CAPNP_DEPRECATED(reason)
+#else
+#define CAPNP_DEPRECATED KJ_DEPRECATED
 #endif
 
 typedef unsigned int uint;
@@ -161,15 +173,19 @@ inline constexpr Kind kind() {
   return k;
 }
 
-#if CAPNP_LITE
+#if _MSC_VER && !defined(__clang__)
 
 #define CAPNP_KIND(T) ::capnp::_::Kind_<T>::kind
-// Avoid constexpr methods in lite mode (MSVC is bad at constexpr).
+// Avoid constexpr methods in MSVC (it remains buggy in many situations).
 
-#else  // CAPNP_LITE
+#else  // _MSC_VER
 
 #define CAPNP_KIND(T) ::capnp::kind<T>()
-// Use this macro rather than kind<T>() in any code which must work in lite mode.
+// Use this macro rather than kind<T>() in any code which must work in MSVC.
+
+#endif  // _MSC_VER, else
+
+#if !CAPNP_LITE
 
 template <typename T, Kind k = kind<T>()>
 inline constexpr Style style() {
@@ -178,12 +194,12 @@ inline constexpr Style style() {
        : k == Kind::INTERFACE ? Style::CAPABILITY : Style::POINTER;
 }
 
-#endif  // CAPNP_LITE, else
+#endif  // !CAPNP_LITE
 
 template <typename T, Kind k = CAPNP_KIND(T)>
 struct List;
 
-#if _MSC_VER
+#if _MSC_VER && !defined(__clang__)
 
 template <typename T, Kind k>
 struct List {};
@@ -298,7 +314,7 @@ namespace _ {  // private
 template <typename T, Kind k = CAPNP_KIND(T)>
 struct PointerHelpers;
 
-#if _MSC_VER
+#if _MSC_VER && !defined(__clang__)
 
 template <typename T, Kind k>
 struct PointerHelpers {};
@@ -312,9 +328,13 @@ struct PointerHelpers {};
 }  // namespace _ (private)
 
 struct MessageSize {
-  // Size of a message.  Every struct type has a method `.totalSize()` that returns this.
+  // Size of a message. Every struct and list type has a method `.totalSize()` that returns this.
   uint64_t wordCount;
   uint capCount;
+
+  inline constexpr MessageSize operator+(const MessageSize& other) const {
+    return { wordCount + other.wordCount, capCount + other.capCount };
+  }
 };
 
 // =======================================================================================
@@ -322,16 +342,28 @@ struct MessageSize {
 
 using kj::byte;
 
-class word { uint64_t content KJ_UNUSED_MEMBER; KJ_DISALLOW_COPY(word); public: word() = default; };
-// word is an opaque type with size of 64 bits.  This type is useful only to make pointer
-// arithmetic clearer.  Since the contents are private, the only way to access them is to first
-// reinterpret_cast to some other pointer type.
-//
-// Copying is disallowed because you should always use memcpy().  Otherwise, you may run afoul of
-// aliasing rules.
-//
-// A pointer of type word* should always be word-aligned even if won't actually be dereferenced as
-// that type.
+class word {
+  // word is an opaque type with size of 64 bits.  This type is useful only to make pointer
+  // arithmetic clearer.  Since the contents are private, the only way to access them is to first
+  // reinterpret_cast to some other pointer type.
+  //
+  // Copying is disallowed because you should always use memcpy().  Otherwise, you may run afoul of
+  // aliasing rules.
+  //
+  // A pointer of type word* should always be word-aligned even if won't actually be dereferenced
+  // as that type.
+public:
+  word() = default;
+private:
+  uint64_t content KJ_UNUSED_MEMBER;
+#if __GNUC__ < 8 || __clang__
+  // GCC 8's -Wclass-memaccess complains whenever we try to memcpy() a `word` if we've disallowed
+  // the copy constructor. We don't want to disable the warning because it's a useful warning and
+  // we'd have to disable it for all applications that include this header. Instead we allow `word`
+  // to be copyable on GCC.
+  KJ_DISALLOW_COPY(word);
+#endif
+};
 
 static_assert(sizeof(byte) == 1, "uint8_t is not one byte?");
 static_assert(sizeof(word) == 8, "uint64_t is not 8 bytes?");
@@ -716,4 +748,4 @@ inline constexpr kj::ArrayPtr<U> arrayPtr(U* ptr, T size) {
 
 }  // namespace capnp
 
-#endif  // CAPNP_COMMON_H_
+CAPNP_END_HEADER

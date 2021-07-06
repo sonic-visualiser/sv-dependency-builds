@@ -19,25 +19,22 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 // THE SOFTWARE.
 
-#ifndef KJ_ASYNC_WIN32_H_
-#define KJ_ASYNC_WIN32_H_
+#pragma once
 
 #if !_WIN32
 #error "This file is Windows-specific. On Unix, include async-unix.h instead."
 #endif
 
+// Include windows.h as lean as possible. (If you need more of the Windows API for your app,
+// #include windows.h yourself before including this header.)
+#include "win32-api-version.h"
+
 #include "async.h"
-#include "time.h"
+#include "timer.h"
 #include "io.h"
 #include <atomic>
 #include <inttypes.h>
 
-// Include windows.h as lean as possible. (If you need more of the Windows API for your app,
-// #include windows.h yourself before including this header.)
-#define WIN32_LEAN_AND_MEAN 1
-#define NOSERVICE 1
-#define NOMCX 1
-#define NOIME 1
 #include <windows.h>
 #include "windows-sanity.h"
 
@@ -128,7 +125,7 @@ public:
     // an exception.
 
     virtual Promise<bool> onSignaledOrAbandoned() = 0;
-    // Like onSingaled(), but instead of throwing when a mutex is abandoned, resolves to `true`.
+    // Like onSignaled(), but instead of throwing when a mutex is abandoned, resolves to `true`.
     // Resolves to `false` for non-abandoned signals.
   };
 
@@ -210,14 +207,14 @@ private:
   class IoOperationImpl;
   class IoObserverImpl;
 
+  const MonotonicClock& clock;
+
   AutoCloseHandle iocp;
   AutoCloseHandle thread;
   Win32WaitObjectThreadPool waitThreads;
   TimerImpl timerImpl;
   mutable std::atomic<bool> sentWake {false};
   bool isAllowApc = false;
-
-  static TimePoint readClock();
 
   void waitIocp(DWORD timeoutMs);
   // Wait on the I/O completion port for up to timeoutMs and pump events. Does not advance the
@@ -230,5 +227,3 @@ private:
 };
 
 } // namespace kj
-
-#endif // KJ_ASYNC_WIN32_H_

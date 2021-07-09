@@ -2,6 +2,10 @@
 # should NOT be bundled inside AppImages. This is a working document; expect it to change
 # over time. File format: one filename per line. Each entry should have a justification comment.
 
+## cc trying to work around
+# //./squashfs-root/usr/lib/libgnutls.so.30: version `GNUTLS_3_6_9' not found (required by /lib64/libglib-2.0.so.0)
+libgnutls.so.30
+
 # See the useful tool at https://abi-laboratory.pro/index.php?view=navigator&symbol=hb_buffer_set_cluster_level#result
 # to investigate issues with missing symbols.
 

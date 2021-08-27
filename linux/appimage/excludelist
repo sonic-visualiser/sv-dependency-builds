@@ -4,7 +4,13 @@
 
 ## cc trying to work around
 # //./squashfs-root/usr/lib/libgnutls.so.30: version `GNUTLS_3_6_9' not found (required by /lib64/libglib-2.0.so.0)
-libgnutls.so.30
+#
+# No, this doesn't work - it leads to
+# /lib64/libgnutls.so.30: undefined symbol: nettle_rsa_pss_sha384_sign_digest_tr, version HOGWEED_4
+# (when building on Ubuntu 16.04 and installing on CentOS 8)
+# Need another approach
+#
+#libgnutls.so.30
 
 # See the useful tool at https://abi-laboratory.pro/index.php?view=navigator&symbol=hb_buffer_set_cluster_level#result
 # to investigate issues with missing symbols.

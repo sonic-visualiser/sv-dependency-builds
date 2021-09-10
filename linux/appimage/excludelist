@@ -126,7 +126,12 @@ libcom_err.so.2
 libcrypt.so.1
 libexpat.so.1
 libgcc_s.so.1
-libglib-2.0.so.0
+
+# cc latest effort to fix //./squashfs-root/usr/lib/libgnutls.so.30: version `GNUTLS_3_6_9' not found (required by /lib64/libglib-2.0.so.0)
+# when building on ubuntu 18.04 and running on centos 8. I think this error occurs because system glib is calling back into appimage libgnutls, but if we unbundle libgnutls we get another problem (documented further up)
+# so we now experiment with bundling libglib...
+# libglib-2.0.so.0
+
 libgpg-error.so.0
 # libgssapi_krb5.so.2 # Disputed, seemingly needed by Arch Linux since Kerberos is named differently there
 # libgssapi.so.3 # Seemingly needed when running Ubuntu 14.04 binaries on Fedora 23
